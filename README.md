@@ -1,7 +1,7 @@
 # Calibre plugin. Anna's Archive and Library Genesis
 
 Search and download books from Library Genesis and Anna's Archive. The world's largest shadow library, aggregating Libgen, Z-Library, Sci-Hub, Internet Archive, and more.
-> Anna's Archive is fully behind Cloudflare/DDoS-Guard on all public mirrors, blocking automated HTTP access. The plugin backend was switched to Library Genesis in v0.4.0. Reintegrating AA is on the roadmap if a viable path emerges.
+> Anna's Archive is fully behind Cloudflare/DDoS-Guard on all public mirrors, blocking automated HTTP access. The plugin backend was switched to Library Genesis in v0.4.0. AA is on the roadmap if a viable path emerges.
 <img width="789" height="463" alt="image" src="https://github.com/user-attachments/assets/6efde1a5-c93d-4c8c-8783-efefe4f58b24" />
 
 ---
