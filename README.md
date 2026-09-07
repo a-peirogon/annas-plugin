@@ -24,7 +24,7 @@ Open the store via **Store > Search stores** or the store icon in the toolbar. S
 
 ---
 
-### Search filters
+## Search filters
 
 For checkbox options (filetype, language, source, content, access): if no boxes are checked, the filter is disabled and all results are shown. If any box is checked, only results matching that selection are returned.
 
