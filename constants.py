@@ -33,6 +33,7 @@ __all__ = (
 # Mirror constants
 # ---------------------------------------------------------------------------
 DEFAULT_MIRRORS = [
+    'https://annas-archive.is',   # no JS challenge from residential IPs
     'https://annas-archive.gl',
     'https://annas-archive.pk',
     'https://annas-archive.gd',
