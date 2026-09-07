@@ -1,7 +1,7 @@
-# Calibre plugin — Anna's Archive
+# Calibre plugin. Anna's Archive and Library Genesis
 
-Browse and download millions of books, papers, and magazines directly from Calibre via [Anna's Archive](https://annas-archive.gl) — the world's largest shadow library, aggregating Libgen, Z-Library, Sci-Hub, Internet Archive, and more.
-
+Search and download books from Library Genesis and Anna's Archive. The world's largest shadow library, aggregating Libgen, Z-Library, Sci-Hub, Internet Archive, and more.
+> Anna's Archive is fully behind Cloudflare/DDoS-Guard on all public mirrors, blocking automated HTTP access. The plugin backend was switched to Library Genesis in v0.4.0. Reintegrating AA is on the roadmap if a viable path emerges.
 <img width="789" height="463" alt="image" src="https://github.com/user-attachments/assets/6efde1a5-c93d-4c8c-8783-efefe4f58b24" />
 
 ---
@@ -11,9 +11,9 @@ Browse and download millions of books, papers, and magazines directly from Calib
 
 ## Installation
 
-1. Go to the [latest release](../../releases/latest) and download `Anna's Archive.zip`
+1. Go to the [latest release](../../releases/latest) and download `cal-libgen.zip`
 2. In Calibre: **Preferences > Plugins > Load plugin from file**
-3. Select the downloaded `.zip` — no extraction needed
+3. Select the downloaded `.zip`, no extraction needed
 4. Restart Calibre
 
 ---
@@ -35,6 +35,9 @@ For checkbox options (filetype, language, source, content, access): if no boxes 
 ```bash
 git clone https://github.com/a-peirogon/cal-annas.git
 cd cal-annas
-zip Anna\'s\ Archive.zip __init__.py annas_archive.py config.py constants.py plugin-import-name-store_annas_archive.txt
-calibre-customize -a "Anna's Archive.zip"
+zip cal-libgen.zip \
+    __init__.py annas_archive.py metadata.py postimport.py \
+    config.py constants.py \
+    plugin-import-name-store_annas_archive.txt
+calibre-customize -a cal-libgen.zip
 ```
