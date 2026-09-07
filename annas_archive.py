@@ -3,7 +3,6 @@ import io
 import json
 import re
 import socket
-import textwrap
 import time
 import logging
 from contextlib import closing
@@ -17,7 +16,7 @@ from calibre.gui2 import open_url
 from calibre.gui2.store import StorePlugin
 from calibre.gui2.store.search_result import SearchResult
 from calibre.gui2.store.web_store_dialog import WebStoreDialog
-from calibre_plugins.store_annas_archive.constants import DEFAULT_TIMEOUT, MAX_PAGES_DEFAULT, TTLCache
+from calibre_plugins.store_annas_archive.constants import DEFAULT_TIMEOUT, MAX_PAGES_DEFAULT, TTLCache, DiskCache
 from lxml import html
 from lxml.etree import ParserError
 
@@ -119,40 +118,53 @@ def _slum_mirrors():
 
 def _make_cover(title, author, fmt='', size=''):
     try:
-        from PIL import Image, ImageDraw, ImageFont
-        import os
-        W, H     = 200, 280
-        bg, acc  = _COVER_PALETTES.get(fmt.upper(), ('#1a1a2e', '#e94560'))
-        img      = Image.new('RGB', (W, H), bg)
-        draw     = ImageDraw.Draw(img)
-        draw.rectangle([0, 0, W, 8], fill=acc)
-        draw.rectangle([0, H - 8, W, H], fill=acc)
         try:
-            bold_path = next(p for p in _FONT_PATHS if os.path.exists(p))
-            fnt_b = ImageFont.truetype(bold_path, 13)
-            fnt_r = ImageFont.truetype(bold_path.replace('-Bold', ''), 10)
-            fnt_s = ImageFont.truetype(bold_path, 11)
-        except Exception:
-            fnt_b = fnt_r = fnt_s = ImageFont.load_default()
-        if fmt:
-            draw.rectangle([10, 16, 52, 36], fill=acc)
-            draw.text((15, 19), fmt.upper()[:4], fill='#ffffff', font=fnt_s)
-        if size:
-            draw.text((W - 55, 19), size, fill=acc, font=fnt_s)
-        y = 50
-        for line in textwrap.wrap(title, 20)[:6]:
-            draw.text((10, y), line, fill='#ffffff', font=fnt_b)
-            y += 18
-        draw.rectangle([10, y + 4, W - 10, y + 6], fill=acc)
-        y += 14
-        for line in textwrap.wrap(author, 26)[:3]:
-            draw.text((10, y), line, fill='#aaaaaa', font=fnt_r)
-            y += 13
-        buf = io.BytesIO()
-        img.save(buf, 'JPEG', quality=80)
-        return 'data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode()
+            from qt.core import (QImage, QPainter, QColor, QFont,
+                                 QRect, Qt, QBuffer, QIODevice)
+        except ImportError:
+            from PyQt5.QtGui import QImage, QPainter, QColor, QFont
+            from PyQt5.QtCore import QRect, Qt, QBuffer, QIODevice
+
+        idx        = hash(title or author or 'x') % len(_COVER_PALETTE)
+        bg, tc, ac = _COVER_PALETTE[idx]
+        W, H       = 96, 144
+        img        = QImage(W, H, QImage.Format.Format_RGB32)
+        img.fill(QColor(*bg))
+        p          = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        p.setPen(QColor(*tc))
+        f = QFont('sans-serif')
+        f.setPixelSize(9)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QRect(5, 5, W - 10, H - 35),
+                   Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignTop, title)
+
+        p.setPen(QColor(*tc))
+        p.drawLine(5, H - 33, W - 5, H - 33)
+
+        p.setPen(QColor(*ac))
+        f2 = QFont('sans-serif')
+        f2.setPixelSize(7)
+        f2.setItalic(True)
+        p.setFont(f2)
+        p.drawText(QRect(5, H - 30, W - 10, 28),
+                   Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignTop, author)
+        p.end()
+
+        qbuf = QBuffer()
+        qbuf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(qbuf, 'JPEG')
+        buf = bytes(qbuf.data())
+        qbuf.close()
+
+        if buf:
+            return 'data:image/jpeg;base64,' + base64.b64encode(buf).decode()
     except Exception:
-        return ''
+        pass
+    return None
+
 
 def _row_title(cell):
     for a in cell.xpath('.//a[contains(@href,"edition.php")]'):
@@ -229,7 +241,14 @@ def _parse_results(raw, base):
             year = _clean(cells[3].text_content()) if len(cells) > 3 else ''
             lang = _clean(cells[4].text_content()) if len(cells) > 4 else ''
 
-            cover = _make_cover(title.split('[')[0].strip(), author, ext, size) or None
+            cover = None
+            if isbn:
+                cover = (
+                    'https://books.google.com/books/content'
+                    '?vid=ISBN:{}&printsec=frontcover&img=1&zoom=1'.format(isbn)
+                )
+            if not cover:
+                cover = _make_cover(title.split('[')[0].strip(), author, ext, size)
 
             s             = SearchResult()
             s.detail_item = md5
@@ -289,6 +308,16 @@ class AnnasArchiveStore(StorePlugin):
         self._cache  = TTLCache(ttl=300)
         self._mirror = LIBGEN_MIRRORS[0]
 
+    def _get_cache(self):
+        cfg = self.config or {}
+        if cfg.get('cache_disk', False):
+            from calibre.utils.config import config_dir
+            import os
+            path = os.path.join(config_dir, 'cal_libgen_cache.json')
+            ttl  = cfg.get('cache_ttl_hours', 24) * 3600
+            return DiskCache(path, ttl=ttl)
+        return self._cache
+
     def _pick_mirror(self):
         mirrors = _slum_mirrors()
         for m in mirrors:
@@ -302,7 +331,8 @@ class AnnasArchiveStore(StorePlugin):
         return mirrors[0]
 
     def _search_url(self, query, mirror, page=1):
-        url = (
+        lang = (self.config or {}).get('language', '')
+        url  = (
             '{}/index.php?req={}'
             '&columns%5B%5D=t&columns%5B%5D=a&columns%5B%5D=s'
             '&columns%5B%5D=y&columns%5B%5D=p&columns%5B%5D=i'
@@ -312,6 +342,8 @@ class AnnasArchiveStore(StorePlugin):
             '&topics%5B%5D=a&topics%5B%5D=m&topics%5B%5D=r&topics%5B%5D=s'
             '&res=25&filesuns=all'
         ).format(mirror, quote_plus(query))
+        if lang:
+            url += '&lang={}'.format(quote_plus(lang))
         if page > 1:
             url += '&page={}'.format(page)
         return url
@@ -325,6 +357,8 @@ class AnnasArchiveStore(StorePlugin):
         count     = 0
         page      = 1
         max_pages = (self.config or {}).get('max_pages', MAX_PAGES_DEFAULT)
+        fetch_max = max(max_results * 3, 25)
+        seen_md5s = set()
 
         while count < max_results and page <= max_pages:
             try:
@@ -342,35 +376,64 @@ class AnnasArchiveStore(StorePlugin):
             page_results = _parse_results(raw, mirror)
             if not page_results:
                 break
-            for r in page_results:
-                if count >= max_results:
+            new_results = [r for r in page_results if r.detail_item not in seen_md5s]
+            if not new_results:
+                break
+            for r in new_results:
+                seen_md5s.add(r.detail_item)
+                if count >= fetch_max:
                     break
                 yield r
                 count += 1
             if len(page_results) < 20:
                 break
             page += 1
-            if count < max_results and page <= max_pages:
+            if count < fetch_max and page <= max_pages:
                 time.sleep(0.5)
+
+    @staticmethod
+    def _relevance(result, qwords):
+        title  = (result.title or '').lower()
+        author = (result.author or '').lower()
+        score  = 0
+        matched = 0
+        for w in qwords:
+            if w in title:
+                score  += 2
+                matched += 1
+            elif w in author:
+                score += 1
+        # Bonus: all query words matched in title
+        if matched == len(qwords):
+            score += 5
+        # Penalty: title looks like a journal/proceedings (long, contains vol/iss/doi)
+        if any(x in title for x in ('vol.', 'iss.', 'doi:', 'proceedings', 'transactions', 'conference')):
+            score -= 3
+        return score
 
     def search(self, query, max_results=10, timeout=DEFAULT_TIMEOUT):
         timeout   = (self.config or {}).get('timeout', timeout)
-        cache_key = '{}|{}'.format(query, max_results)
-        cached    = self._cache.get(cache_key)
+        lang      = (self.config or {}).get('language', '')
+        cache_key = '{}|{}|{}'.format(query, max_results, lang)
+        cache     = self._get_cache()
+        cached    = cache.get(cache_key)
         if cached is not None:
             yield from cached
             return
+        qwords  = [w.lower() for w in re.split(r'\s+', str(query).strip()) if len(w) > 2]
         results = []
         try:
             for r in self._search(query, max_results, timeout):
                 results.append(r)
-                yield r
         except Exception as exc:
             logger.exception('Search error: %s', exc)
+        if qwords:
+            results.sort(key=lambda r: self._relevance(r, qwords), reverse=True)
+        yield from results
         if results:
-            self._cache.set(cache_key, results)
+            cache.set(cache_key, results)
 
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, parent=None, detail_item=None, external=False, **kwargs):
         mirror = self._pick_mirror()
         url    = ('{}/file.php?md5={}'.format(mirror, detail_item)
                   if detail_item and _MD5_RE.match(detail_item)
@@ -445,9 +508,13 @@ class AnnasArchiveStore(StorePlugin):
                 req3.add_header('User-Agent', USER_AGENT)
                 with urlopen(req3, timeout=timeout) as r3:
                     fdata = json.loads(r3.read()).get(file_id, {})
-                if fdata.get('libgen_id') and fdata.get('cover_exists') == '1':
-                    bucket = (int(fdata['libgen_id']) // 1000) * 1000
-                    search_result.cover_url = 'https://libgen.li/covers/{}/{}_small.jpg'.format(bucket, md5)
+                if fdata.get('cover_exists') == '1':
+                    if edition_id:
+                        bucket = (int(edition_id) // 1000) * 1000
+                        search_result.cover_url = 'https://libgen.li/editioncovers/{}/{}.jpg'.format(bucket, edition_id)
+                    elif fdata.get('libgen_id'):
+                        bucket = (int(fdata['libgen_id']) // 1000) * 1000
+                        search_result.cover_url = 'https://libgen.li/covers/{}/{}_small.jpg'.format(bucket, md5)
             except Exception as exc:
                 logger.debug('Cover bucket lookup failed: %s', exc)
 
