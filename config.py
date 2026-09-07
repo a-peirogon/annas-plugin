@@ -1,20 +1,22 @@
+import os
 import time
 
-from calibre_plugins.store_annas_archive.constants import DEFAULT_TIMEOUT, MAX_PAGES_DEFAULT
+from calibre_plugins.store_annas_archive.constants import (
+    DEFAULT_TIMEOUT, MAX_PAGES_DEFAULT, LANGUAGES
+)
 
 try:
     from qt.core import (
-        Qt, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-        QGroupBox, QSpinBox, QPushButton, QThread, pyqtSignal,
-        QListWidget, QListWidgetItem, QAbstractItemView,
+        Qt, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
+        QSpinBox, QPushButton, QThread, pyqtSignal, QComboBox,
+        QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox,
     )
 except (ImportError, ModuleNotFoundError):
-    from PyQt5.QtCore import Qt, QThread
-    from PyQt5.QtCore import pyqtSignal
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal
     from PyQt5.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-        QGroupBox, QSpinBox, QPushButton,
-        QListWidget, QListWidgetItem, QAbstractItemView,
+        QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
+        QSpinBox, QPushButton, QComboBox,
+        QListWidget, QListWidgetItem, QAbstractItemView, QCheckBox,
     )
 
 from calibre_plugins.store_annas_archive.annas_archive import LIBGEN_MIRRORS
@@ -31,9 +33,8 @@ class MirrorTestWorker(QThread):
         self._stop    = False
 
     def run(self):
-        import socket
-        from urllib.parse import urlparse
         import http.client as hc
+        from urllib.parse import urlparse
         from calibre_plugins.store_annas_archive.annas_archive import USER_AGENT
         for mirror in self._mirrors:
             if self._stop:
@@ -67,28 +68,60 @@ class ConfigWidget(QWidget):
     def _build(self):
         root = QVBoxLayout(self)
 
-        adv = QGroupBox(_('Advanced'))
-        gl  = QVBoxLayout(adv)
+        search = QGroupBox(_('Search'))
+        sl     = QVBoxLayout(search)
 
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel(_('Max pages:')))
+        row_lang = QHBoxLayout()
+        row_lang.addWidget(QLabel(_('Language:')))
+        self._lang = QComboBox()
+        for code, label in LANGUAGES:
+            self._lang.addItem(label, code)
+        row_lang.addWidget(self._lang)
+        row_lang.addStretch()
+        sl.addLayout(row_lang)
+
+        row_pages = QHBoxLayout()
+        row_pages.addWidget(QLabel(_('Max pages:')))
         self._max_pages = QSpinBox()
         self._max_pages.setRange(1, 100)
         self._max_pages.setValue(MAX_PAGES_DEFAULT)
-        row1.addWidget(self._max_pages)
-        row1.addStretch()
-        gl.addLayout(row1)
+        row_pages.addWidget(self._max_pages)
+        row_pages.addStretch()
+        sl.addLayout(row_pages)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(QLabel(_('Timeout (s):')))
+        row_to = QHBoxLayout()
+        row_to.addWidget(QLabel(_('Timeout (s):')))
         self._timeout = QSpinBox()
         self._timeout.setRange(5, 300)
         self._timeout.setValue(DEFAULT_TIMEOUT)
-        row2.addWidget(self._timeout)
-        row2.addStretch()
-        gl.addLayout(row2)
+        row_to.addWidget(self._timeout)
+        row_to.addStretch()
+        sl.addLayout(row_to)
 
-        root.addWidget(adv)
+        root.addWidget(search)
+
+        cache = QGroupBox(_('Cache'))
+        cl    = QVBoxLayout(cache)
+
+        row_cache = QHBoxLayout()
+        self._cache_enabled = QCheckBox(_('Persist search cache to disk'))
+        row_cache.addWidget(self._cache_enabled)
+        cl.addLayout(row_cache)
+
+        row_ttl = QHBoxLayout()
+        row_ttl.addWidget(QLabel(_('Cache TTL (hours):')))
+        self._cache_ttl = QSpinBox()
+        self._cache_ttl.setRange(1, 168)
+        self._cache_ttl.setValue(24)
+        row_ttl.addWidget(self._cache_ttl)
+
+        self._clear_cache = QPushButton(_('Clear cache'))
+        self._clear_cache.clicked.connect(self._on_clear_cache)
+        row_ttl.addWidget(self._clear_cache)
+        row_ttl.addStretch()
+        cl.addLayout(row_ttl)
+
+        root.addWidget(cache)
 
         mir = QGroupBox(_('Mirrors'))
         ml  = QVBoxLayout(mir)
@@ -111,12 +144,41 @@ class ConfigWidget(QWidget):
         cfg = self._store.config or {}
         self._max_pages.setValue(cfg.get('max_pages', MAX_PAGES_DEFAULT))
         self._timeout.setValue(cfg.get('timeout', DEFAULT_TIMEOUT))
+        self._cache_enabled.setChecked(cfg.get('cache_disk', False))
+        self._cache_ttl.setValue(cfg.get('cache_ttl_hours', 24))
+        lang = cfg.get('language', '')
+        for i in range(self._lang.count()):
+            if self._lang.itemData(i) == lang:
+                self._lang.setCurrentIndex(i)
+                break
 
     def save_settings(self):
         cfg = self._store.config or {}
-        cfg['max_pages'] = self._max_pages.value()
-        cfg['timeout']   = self._timeout.value()
-        self._store.config = cfg
+        cfg['max_pages']       = self._max_pages.value()
+        cfg['timeout']         = self._timeout.value()
+        cfg['language']        = self._lang.currentData()
+        cfg['cache_disk']      = self._cache_enabled.isChecked()
+        cfg['cache_ttl_hours'] = self._cache_ttl.value()
+        self._store.config     = cfg
+
+    def _on_clear_cache(self):
+        try:
+            from calibre_plugins.store_annas_archive.annas_archive import AnnasArchiveStore
+            self._store._cache.clear()
+        except Exception:
+            pass
+        try:
+            import os
+            path = self._cache_path()
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+        self._clear_cache.setText(_('Cleared!'))
+
+    def _cache_path(self):
+        from calibre.utils.config import config_dir
+        return os.path.join(config_dir, 'cal_libgen_cache.json')
 
     def _test_mirrors(self):
         if self._worker and self._worker.isRunning():
