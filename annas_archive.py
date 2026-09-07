@@ -94,6 +94,29 @@ def _mirror_ok(mirror, timeout=6):
     except Exception:
         return False
 
+def _slum_mirrors():
+    try:
+        req = Request('https://open-slum.org/libgen.html')
+        req.add_header('User-Agent', USER_AGENT)
+        with urlopen(req, timeout=8) as r:
+            raw = r.read().decode('utf-8', 'replace')
+        ranked = []
+        for block in re.split(r'(?=libgen\.\w)', raw):
+            m = re.search(r'(libgen\.\w+)', block)
+            if not m:
+                continue
+            domain  = m.group(1)
+            if 'PROTECTED' in block:
+                continue
+            lat_m   = re.search(r'Latency:\s*(\d+)ms', block)
+            latency = int(lat_m.group(1)) if lat_m else 9999
+            if 'Status: 200' in block:
+                ranked.append((latency, 'https://' + domain))
+        ranked.sort()
+        return [url for _, url in ranked] or LIBGEN_MIRRORS
+    except Exception:
+        return LIBGEN_MIRRORS
+
 def _make_cover(title, author, fmt='', size=''):
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -267,7 +290,8 @@ class AnnasArchiveStore(StorePlugin):
         self._mirror = LIBGEN_MIRRORS[0]
 
     def _pick_mirror(self):
-        for m in LIBGEN_MIRRORS:
+        mirrors = _slum_mirrors()
+        for m in mirrors:
             try:
                 socket.gethostbyname(urlparse(m).netloc)
                 if _mirror_ok(m):
@@ -275,7 +299,7 @@ class AnnasArchiveStore(StorePlugin):
                     return m
             except Exception:
                 pass
-        return LIBGEN_MIRRORS[0]
+        return mirrors[0]
 
     def _search_url(self, query, mirror, page=1):
         url = (
