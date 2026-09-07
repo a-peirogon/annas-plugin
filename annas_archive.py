@@ -1,5 +1,4 @@
 import base64
-import io
 import json
 import re
 import socket
@@ -52,16 +51,15 @@ _JUNK_RE     = re.compile(r'"\s*href="[^"]*"\s*>')
 SearchResults = Generator[SearchResult, None, None]
 logger = logging.getLogger(__name__)
 
-_COVER_PALETTES = {
-    'PDF':  ('#1a1a2e', '#e94560'),
-    'EPUB': ('#0f3460', '#533483'),
-    'MOBI': ('#2d6a4f', '#40916c'),
-    'DJVU': ('#3d0c02', '#c64b00'),
-    'FB2':  ('#1a3a1a', '#4a9e4a'),
-}
-_FONT_PATHS = [
-    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+_COVER_PALETTE = [
+    ((26,  26,  46),  (233, 69,  96),  (180, 180, 180)),
+    ((15,  52,  96),  (83,  52,  131), (180, 180, 180)),
+    ((45,  106, 79),  (64,  145, 108), (180, 180, 180)),
+    ((61,  12,  2),   (198, 75,  0),   (180, 180, 180)),
+    ((26,  58,  26),  (74,  158, 74),  (180, 180, 180)),
+    ((70,  30,  10),  (180, 80,  20),  (180, 180, 180)),
+    ((10,  30,  70),  (20,  100, 180), (180, 180, 180)),
+    ((50,  10,  50),  (150, 30,  150), (180, 180, 180)),
 ]
 
 
@@ -305,21 +303,30 @@ class AnnasArchiveStore(StorePlugin):
 
     def __init__(self, gui, name, config=None, base_plugin=None):
         super().__init__(gui, name, config, base_plugin)
-        self._cache  = TTLCache(ttl=300)
-        self._mirror = LIBGEN_MIRRORS[0]
+        self._cache       = TTLCache(ttl=300)
+        self._disk_cache  = None
+        self._mirror      = LIBGEN_MIRRORS[0]
+        self._slum_cache  = None
+        self._slum_ts     = 0
 
     def _get_cache(self):
         cfg = self.config or {}
         if cfg.get('cache_disk', False):
-            from calibre.utils.config import config_dir
-            import os
-            path = os.path.join(config_dir, 'cal_libgen_cache.json')
-            ttl  = cfg.get('cache_ttl_hours', 24) * 3600
-            return DiskCache(path, ttl=ttl)
+            if self._disk_cache is None:
+                from calibre.utils.config import config_dir
+                import os
+                path = os.path.join(config_dir, 'cal_libgen_cache.json')
+                ttl  = cfg.get('cache_ttl_hours', 24) * 3600
+                self._disk_cache = DiskCache(path, ttl=ttl)
+            return self._disk_cache
         return self._cache
 
     def _pick_mirror(self):
-        mirrors = _slum_mirrors()
+        now = time.time()
+        if self._slum_cache is None or now - self._slum_ts > 600:
+            self._slum_cache = _slum_mirrors()
+            self._slum_ts    = now
+        mirrors = self._slum_cache
         for m in mirrors:
             try:
                 socket.gethostbyname(urlparse(m).netloc)
@@ -360,7 +367,7 @@ class AnnasArchiveStore(StorePlugin):
         fetch_max = max(max_results * 3, 25)
         seen_md5s = set()
 
-        while count < max_results and page <= max_pages:
+        while count < fetch_max and page <= max_pages:
             try:
                 with closing(br.open(self._search_url(query, mirror, page), timeout=timeout)) as r:
                     raw = r.read()
@@ -458,65 +465,85 @@ class AnnasArchiveStore(StorePlugin):
         isbn       = getattr(search_result, '_isbn', '')
         lang       = getattr(search_result, '_lang', '')
 
-        if edition_id:
+        from threading import Thread
+
+        ed_data   = {}
+        meta_data = {}
+        file_data = {}
+
+        def _fetch_edition():
+            if not edition_id:
+                return
             try:
                 req = Request('https://libgen.li/json.php?object=e&addkeys=*&ids={}'.format(edition_id))
                 req.add_header('User-Agent', USER_AGENT)
                 with urlopen(req, timeout=timeout) as r:
-                    ed = json.loads(r.read()).get(edition_id, {})
-                if ed.get('title'):
-                    search_result.title = ed['title']
-                if ed.get('author'):
-                    search_result.author = ed['author']
-                if ed.get('publisher'):
-                    search_result.publisher = ed['publisher']
-                if ed.get('year'):
-                    search_result.pubdate = str(ed['year'])
-                extras = []
-                for label, key in [('Series', 'series_name'), ('Pages', 'pages'),
-                                    ('DOI', 'doi')]:
-                    if ed.get(key):
-                        extras.append('{}: {}'.format(label, ed[key]))
-                if isbn:
-                    extras.append('ISBN: {}'.format(isbn))
-                if lang:
-                    extras.append('Language: {}'.format(lang))
-                if extras:
-                    search_result.comments = '\n'.join(extras)
+                    ed_data.update(json.loads(r.read()).get(edition_id, {}))
             except Exception as exc:
                 logger.debug('Edition metadata failed: %s', exc)
 
-        if file_id:
+        def _fetch_meta():
+            if not file_id:
+                return
             try:
-                req2 = Request('https://libgen.xyz/api/search/by-id?id={}'.format(file_id))
-                req2.add_header('User-Agent', USER_AGENT)
-                req2.add_header('Accept', 'application/json')
-                with urlopen(req2, timeout=timeout) as r2:
-                    meta = json.loads(r2.read()).get('result', {})
-                if meta.get('description'):
-                    desc     = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', meta['description'])).strip()
-                    existing = search_result.comments or ''
-                    search_result.comments = (existing + '\n\n' + desc).strip()
-                if not search_result.pubdate and meta.get('year'):
-                    search_result.pubdate = str(meta['year'])
+                req = Request('https://libgen.xyz/api/search/by-id?id={}'.format(file_id))
+                req.add_header('User-Agent', USER_AGENT)
+                req.add_header('Accept', 'application/json')
+                with urlopen(req, timeout=timeout) as r:
+                    meta_data.update(json.loads(r.read()).get('result', {}))
             except Exception as exc:
                 logger.debug('Nuxt metadata failed: %s', exc)
 
-        if file_id:
+        def _fetch_file():
+            if not file_id:
+                return
             try:
-                req3 = Request('https://libgen.li/json.php?object=f&addkeys=*&ids={}'.format(file_id))
-                req3.add_header('User-Agent', USER_AGENT)
-                with urlopen(req3, timeout=timeout) as r3:
-                    fdata = json.loads(r3.read()).get(file_id, {})
-                if fdata.get('cover_exists') == '1':
-                    if edition_id:
-                        bucket = (int(edition_id) // 1000) * 1000
-                        search_result.cover_url = 'https://libgen.li/editioncovers/{}/{}.jpg'.format(bucket, edition_id)
-                    elif fdata.get('libgen_id'):
-                        bucket = (int(fdata['libgen_id']) // 1000) * 1000
-                        search_result.cover_url = 'https://libgen.li/covers/{}/{}_small.jpg'.format(bucket, md5)
+                req = Request('https://libgen.li/json.php?object=f&addkeys=*&ids={}'.format(file_id))
+                req.add_header('User-Agent', USER_AGENT)
+                with urlopen(req, timeout=timeout) as r:
+                    file_data.update(json.loads(r.read()).get(file_id, {}))
             except Exception as exc:
                 logger.debug('Cover bucket lookup failed: %s', exc)
+
+        threads = [Thread(target=f) for f in (_fetch_edition, _fetch_meta, _fetch_file)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout)
+
+        if ed_data.get('title'):
+            search_result.title = ed_data['title']
+        if ed_data.get('author'):
+            search_result.author = ed_data['author']
+        if ed_data.get('publisher'):
+            search_result.publisher = ed_data['publisher']
+        if ed_data.get('year'):
+            search_result.pubdate = str(ed_data['year'])
+        extras = []
+        for label, key in [('Series', 'series_name'), ('Pages', 'pages'), ('DOI', 'doi')]:
+            if ed_data.get(key):
+                extras.append('{}: {}'.format(label, ed_data[key]))
+        if isbn:
+            extras.append('ISBN: {}'.format(isbn))
+        if lang:
+            extras.append('Language: {}'.format(lang))
+        if extras:
+            search_result.comments = '\n'.join(extras)
+
+        if meta_data.get('description'):
+            desc     = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', meta_data['description'])).strip()
+            existing = search_result.comments or ''
+            search_result.comments = (existing + '\n\n' + desc).strip()
+        if not search_result.pubdate and meta_data.get('year'):
+            search_result.pubdate = str(meta_data['year'])
+
+        if file_data.get('cover_exists') == '1':
+            if edition_id:
+                bucket = (int(edition_id) // 1000) * 1000
+                search_result.cover_url = 'https://libgen.li/editioncovers/{}/{}.jpg'.format(bucket, edition_id)
+            elif file_data.get('libgen_id'):
+                bucket = (int(file_data['libgen_id']) // 1000) * 1000
+                search_result.cover_url = 'https://libgen.li/covers/{}/{}_small.jpg'.format(bucket, md5)
 
         if file_id:
             search_result.downloads['Libgen.direct.{}'.format(fmt)] = \
