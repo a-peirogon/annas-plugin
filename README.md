@@ -6,6 +6,9 @@ Browse and download millions of books, papers, and magazines directly from Calib
 
 ---
 
+## Features
+- Search Library Genesis with 25+ results per page
+
 ## Installation
 
 1. Go to the [latest release](../../releases/latest) and download `Anna's Archive.zip`

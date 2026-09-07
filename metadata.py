@@ -78,7 +78,6 @@ def _search_libgen(query, max_results=5):
     for row in rows[:max_results]:
         try:
             cells = row.xpath('td')
-            # MD5
             md5 = None
             for h in cells[-1].xpath('.//a/@href'):
                 m = re.search(r'[?&]md5=([a-fA-F0-9]{32})', h, re.I)
@@ -87,21 +86,18 @@ def _search_libgen(query, max_results=5):
                     break
             if not md5:
                 continue
-            # file_id
             file_id = None
             for h in cells[6].xpath('.//a/@href'):
                 m = re.search(r'file\.php\?id=(\d+)', h)
                 if m:
                     file_id = m.group(1)
                     break
-            # edition_id
             edition_id = None
             for h in cells[0].xpath('.//a/@href'):
                 m = re.search(r'edition\.php\?id=(\d+)', h)
                 if m:
                     edition_id = m.group(1)
                     break
-            # isbn
             isbn = ''
             isbn_raw = cells[0].xpath('.//font[@color="green"]/text()')
             if isbn_raw:
@@ -126,7 +122,6 @@ def _fetch_metadata(hit):
     if hit.get('isbn'):
         mi.isbn = hit['isbn']
 
-    # Edition record: title, author, publisher, year, pages, doi, series
     if hit.get('edition_id'):
         try:
             data = json.loads(_get(
@@ -152,7 +147,6 @@ def _fetch_metadata(hit):
         except Exception as exc:
             logger.debug('Edition fetch failed: %s', exc)
 
-    # File record: cover bucket
     cover_url = None
     if hit.get('file_id'):
         try:
@@ -167,7 +161,6 @@ def _fetch_metadata(hit):
         except Exception as exc:
             logger.debug('File record fetch failed: %s', exc)
 
-        # Nuxt API: description + language
         try:
             meta = json.loads(_get(
                 'https://libgen.xyz/api/search/by-id?id={}'.format(hit['file_id'])
@@ -215,7 +208,6 @@ class LibgenMetadata(Source):
 
     def identify(self, log, result_queue, abort, title=None, authors=None,
                  identifiers={}, timeout=30):
-        # Build query: prefer ISBN, then title+author
         isbn = identifiers.get('isbn') or identifiers.get('ISBN')
         md5  = identifiers.get('md5')
         if isbn:
@@ -242,7 +234,6 @@ class LibgenMetadata(Source):
             try:
                 mi = _fetch_metadata(hit)
                 results.append(mi)
-                # Cache cover URL
                 cover_url = mi.identifiers.get('libgen_cover')
                 if cover_url:
                     self.cache_identifier_to_cover_url(hit['md5'], cover_url)
@@ -268,7 +259,6 @@ class LibgenMetadata(Source):
         md5 = identifiers.get('md5')
         url = self.get_cached_cover_url(identifiers)
         if not url and md5:
-            # Try to find it via file record
             try:
                 hits = _search_libgen(title or md5, max_results=3)
                 for hit in hits:
